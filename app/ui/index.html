@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFSMW Mod Studio</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="bg"><div class="bg-glow"></div><div class="bg-lines"></div></div>
+
+<div id="splash">
+  <div class="splash-inner">
+    <div class="brand-top">Need for Speed: Most Wanted &middot; 2005</div>
+    <div class="splash-title">MOD<span>STUDIO</span></div>
+    <div class="loadbar"><i></i></div>
+    <div class="splash-msg" id="splashMsg">Loading your garage&hellip;</div>
+  </div>
+</div>
+
+<div id="app">
+  <aside id="side">
+    <div class="brand">
+      <svg class="brand-gauge" viewBox="0 0 64 64" aria-hidden="true">
+        <path d="M10 44a22 22 0 1 1 44 0" fill="none" stroke="#2b2f38" stroke-width="7" stroke-linecap="round"/>
+        <path d="M10 44a22 22 0 0 1 37.6-15.6" fill="none" stroke="url(#g1)" stroke-width="7" stroke-linecap="round"/>
+        <line x1="32" y1="44" x2="47" y2="25" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+        <circle cx="32" cy="44" r="5" fill="#fff"/>
+        <defs><linearGradient id="g1" x1="0" x2="1"><stop offset="0" stop-color="#ffd000"/><stop offset="1" stop-color="#ff5e00"/></linearGradient></defs>
+      </svg>
+      <div>
+        <div class="brand-top">NFS Most Wanted &middot; 2005</div>
+        <div class="brand-main">MOD<span>STUDIO</span></div>
+      </div>
+    </div>
+    <nav id="nav"></nav>
+    <div class="side-bottom">
+      <div id="applyState" class="apply-state"></div>
+      <button id="applyBtn" class="btn-apply"><span>APPLY TO GAME</span><b>&raquo;</b></button>
+      <div class="ver" id="ver"></div>
+    </div>
+  </aside>
+  <main id="main"></main>
+</div>
+
+<div id="toasts"></div>
+<div id="modal" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
