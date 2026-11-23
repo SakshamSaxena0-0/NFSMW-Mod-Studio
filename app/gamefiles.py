@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 
+import hooks
 from vltdb import AttribDB, FormatError
 
 ATTR = os.path.join('GLOBAL', 'attributes.bin')
@@ -111,7 +112,9 @@ def _write_atomic(path, data):
     os.replace(tmp, path)
 
 
-COPFLY_SLOTS = {0x8AD460: 0x69CA30, 0x8AD2F4: 0x69C030, 0x8AD378: 0x69C030, 0x8AD020: 0x68BC80, 0x8AC950: 0x68BC80}
+COPFLY_SLOTS = {slot: fn for _, slot, _, fn in hooks.COPFLY_SLOTS}
+CAMERA_SLOTS = {slot: fn for _, slot, _, fn in hooks.CAMERA_SLOTS}
+CAMERA_CALLS = {site: fn for _, site, _, fn in hooks.CAMERA_CALLS}
 
 
 def _pe_reader(data):
@@ -134,6 +137,16 @@ def copfly_compatible(game):
         with open(os.path.join(game, 'speed.exe'), 'rb') as f:
             u32 = _pe_reader(f.read())
         return all(u32(slot) == fn for slot, fn in COPFLY_SLOTS.items())
+    except (OSError, struct.error):
+        return False
+
+
+def camera_compatible(game):
+    try:
+        with open(os.path.join(game, 'speed.exe'), 'rb') as f:
+            u32 = _pe_reader(f.read())
+        return (all(u32(slot) == fn for slot, fn in CAMERA_SLOTS.items()) and
+                all(hooks.call_target(u32, site) == fn for site, fn in CAMERA_CALLS.items()))
     except (OSError, struct.error):
         return False
 
@@ -422,7 +435,23 @@ class Game:
         return on('Launch', 1), {'cops': on('KeepSpeedCops', int(old)), 'traffic': on('KeepSpeedTraffic', int(old)),
                                  'walls': on('KeepSpeedWalls', 0)}
 
-    def install_copfly(self, settings, launch=True, keep=None):
+    def read_camera(self):
+        from copfly_cfg import CAMERA_SETTINGS
+        vals = read_ini_values(self.p(COPFLY_INI), 'Camera', [s.key for s in CAMERA_SETTINGS])
+        out = {}
+        for s in CAMERA_SETTINGS:
+            try:
+                out[s.key] = float(vals[s.key]) if s.key in vals else s.default
+            except ValueError:
+                out[s.key] = s.default
+        return out
+
+    def camera_modes(self):
+        vals = read_ini_values(self.p(COPFLY_INI), 'Camera', ['FovSpeed', 'SmoothCam'])
+        on = lambda k: (vals.get(k) or '0').strip() not in ('0', '')
+        return on('FovSpeed'), on('SmoothCam')
+
+    def install_copfly(self, settings, launch=True, keep=None, camera=None):
         from copfly_cfg import ini_text
         asi = resource('copfly', 'NFSMWCopFly.asi')
         if not os.path.isfile(asi):
@@ -431,7 +460,7 @@ class Game:
         os.makedirs(self.p('scripts'), exist_ok=True)
         shutil.copy2(asi, self.p(COPFLY_ASI))
         with open(self.p(COPFLY_INI), 'w', encoding='utf-8') as f:
-            f.write(ini_text(settings, launch, keep))
+            f.write(ini_text(settings, launch, keep, camera))
 
     def uninstall_copfly(self):
         for rel in (COPFLY_ASI, COPFLY_INI, COPFLY_LOG):

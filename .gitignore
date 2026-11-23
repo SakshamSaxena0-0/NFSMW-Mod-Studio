@@ -9,3 +9,4 @@ app/copfly/*.pdb
 copfly/*.asi
 copfly/*.lib
 copfly/*.pdb
+copfly/hooks.h

@@ -18,7 +18,7 @@ const built = {};
 const ui = {};
 
 const PAGES = [['game', 'Game'], ['cars', 'Cars'], ['nitro', 'Nitro'], ['police', 'Police & Heat'],
-               ['copfly', 'CopFly'], ['world', 'No stopping'], ['profiles', 'Profiles']];
+               ['copfly', 'CopFly'], ['world', 'No stopping'], ['camera', 'Camera'], ['profiles', 'Profiles']];
 const api = () => window.pywebview.api;
 
 function fmt(v) {
@@ -213,7 +213,7 @@ function gotState(r) {
 async function restore() {
   if (!S.game.ok) return;
   if (!await confirmBox('Restore originals?', 'Puts the original car data back: car tunes, nitro, police and spike mods are '
-      + 'removed. Add-on cars, CopFly and heat settings stay as they are.', 'Restore', true)) return;
+      + 'removed. Add-on cars, CopFly, camera and heat settings stay as they are.', 'Restore', true)) return;
   const r = await api().restore();
   if (!r.ok) { toast('err', 'Not restored', [r.error]); return; }
   loadState(r.state);
@@ -522,6 +522,75 @@ BUILD.world = () => {
 };
 REFRESH.world = () => {
   for (const [key] of NOSTOP) ui.nostop[key].set(!!(cfg.world && cfg.world[key]));
+};
+
+const CAMERA = [
+  ['fov_speed', 'FOV widens with speed', 'The view gets wider the faster you go, up to the extra set below at full speed, and '
+    + 'goes back to normal when you slow down. It adds to the game\'s own field of view (and the Widescreen Fix), in the '
+    + 'chase, bumper and hood views.', ['FovMaxExtra', 'FovResponse']],
+  ['smooth', 'Smoother camera + no shake', 'The chase camera follows bumps and turns a little more smoothly, and the '
+    + 'camera shake at speed, with nitro, on rough roads and from other shake effects is turned down. The camera never strays '
+    + 'far from where the game puts it, so it does not lag into walls or the car.', ['SmoothAmount', 'ShakeScale']],
+];
+const camSetting = (key, def) => cfg.camera?.settings?.[key] ?? def;
+BUILD.camera = () => {
+  const s = shell('camera', 'Camera', 'Two optional camera tweaks for the driving views. Switch on what you want, then press '
+    + 'Apply. They use the CopFly plugin, which the studio installs for you.');
+  const hero = h(`<div class="hero"><div class="row"><div class="grow"><div class="hero-title">Cam<span>era</span></div>
+     <div class="hero-tag">WIDER AT SPEED &middot; NO SHAKE</div><div class="chips" id="camChips"></div>
+     <div class="note warn" id="camWarn" style="margin-top:10px"></div></div>
+     <div id="camBtns" class="row"></div></div></div>`);
+  $('#camBtns', hero).append(btn('Defaults', 'small', () => {
+    cfg.camera.settings = {};
+    for (const d of S.cameraDefs) cfg.camera.settings[d.key] = d.default;
+    REFRESH.camera(); changed();
+  }), btn('Open log', 'small', async () => { if (!await api().open_log()) toast('err', 'No log yet', ['It is written while you play with the plugin installed.']); }));
+  s.append(hero);
+  ui.cam = {}; ui.camKnobs = {}; ui.camBox = {};
+  for (const [key, title, text, keys] of CAMERA) {
+    const p = h(`<div class="panel" style="margin-bottom:14px"><div class="note" style="margin-top:8px">${esc(text)}</div></div>`);
+    const t = sw(title, false, v => { cfg.camera[key] = v; ui.camBox[key].hidden = !v; changed(); });
+    p.prepend(t);
+    ui.cam[key] = t;
+    const box = h('<div style="margin-top:10px"></div>');
+    for (const k of keys) {
+      const d = S.cameraDefs.find(x => x.key === k);
+      const el = knob({ ...d, stock: d.default, clamp: true }, d.default, v => {
+        cfg.camera.settings = { ...(cfg.camera.settings || {}), [k]: v };
+        changed();
+      }, { unit: k === 'FovMaxExtra' ? '°' : k === 'FovResponse' ? 's' : '' });
+      ui.camKnobs[k] = el;
+      box.append(el);
+    }
+    ui.camBox[key] = box;
+    p.append(box);
+    s.append(p);
+  }
+  const logDef = S.cameraDefs.find(x => x.key === 'Log');
+  const lp = h(`<div class="panel flat"><div class="note" style="margin-top:6px">${esc(logDef.help)}</div></div>`);
+  ui.camLog = sw(logDef.label, false, v => { cfg.camera.settings = { ...(cfg.camera.settings || {}), Log: v ? 1 : 0 }; changed(); }, 'mini');
+  lp.prepend(ui.camLog);
+  s.append(label('Testing'), lp);
+};
+REFRESH.camera = async () => {
+  for (const [key] of CAMERA) {
+    ui.cam[key].set(!!cfg.camera?.[key]);
+    ui.camBox[key].hidden = !cfg.camera?.[key];
+  }
+  for (const [k, el] of Object.entries(ui.camKnobs)) el.set(camSetting(k, S.cameraDefs.find(x => x.key === k).default));
+  ui.camLog.set(+camSetting('Log', 0));
+  const chips = $('#camChips'), warn = $('#camWarn');
+  if (!S.game.ok) { chips.innerHTML = ''; warn.textContent = ''; return; }
+  const st = lastStatus || await api().status();
+  lastStatus = st;
+  const pick = t => st.find(x => x.title.startsWith(t)) || {};
+  const cam = pick('Camera'), ld = pick('ASI loader');
+  const ok = cam.state === 'ok';
+  chips.innerHTML = `<span class="chip ${ok ? 'ok' : 'bad'}">speed.exe v1.3 ${ok ? '&#10003;' : '&#10007;'}</span>
+    <span class="chip ${ld.state === 'ok' ? 'ok' : 'warn'}">ASI loader ${ld.state === 'ok' ? '&#10003;' : 'missing'}</span>`;
+  for (const [key] of CAMERA) ui.cam[key].disable(!ok && !cfg.camera?.[key]);
+  warn.textContent = ok ? '' : 'Your speed.exe does not have the v1.3 camera code, so these switches cannot work. Everything '
+    + 'else in the studio still does.';
 };
 
 BUILD.profiles = () => {

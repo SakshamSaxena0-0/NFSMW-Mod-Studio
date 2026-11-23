@@ -34,6 +34,33 @@ SETTINGS = [
 ]
 DEFAULTS = {s.key: s.default for s in SETTINGS}
 
+CAMERA_SETTINGS = [
+    Setting('FovMaxExtra', 'Extra FOV at full speed', 12.0, 0, 30, 0.5, 'float',
+            'How many degrees wider the view gets at full speed. 0 = no change.',
+            'extra field of view in degrees at full speed (0 to 30)'),
+    Setting('FovStartSpeed', 'Widening starts at', 15.0, 0, 100, 1, 'float',
+            'Speed in m/s where the view starts to widen (15 = 54 km/h).',
+            'speed in m/s where the widening starts (15 = 54 km/h)'),
+    Setting('FovFullSpeed', 'Full widening at', 70.0, 1, 150, 1, 'float',
+            'Speed in m/s where the view is at its widest (70 = 252 km/h).',
+            'speed in m/s where it reaches FovMaxExtra (70 = 252 km/h)'),
+    Setting('FovResponse', 'Response time', 0.35, 0.02, 5, 0.01, 'float',
+            'Seconds the view takes to follow a speed change. Lower = snappier, higher = smoother.',
+            'seconds the field of view takes to follow a speed change (0.02 to 5)'),
+    Setting('SmoothAmount', 'Smoothing', 0.5, 0, 1, 0.05, 'float',
+            'How much the chase camera is smoothed. 0 = stock, 1 = the most (still light, it never strays far from '
+            'the stock camera).',
+            '0 = stock follow, 1 = the most smoothing (it never strays far from the stock camera)'),
+    Setting('ShakeScale', 'Shake amount', 0.0, 0, 1, 0.05, 'float',
+            'All camera shake of the driving views (at speed, with nitro, on rough roads). 0 = none, 1 = stock.',
+            'camera shake: 0 = none, 1 = stock'),
+    Setting('Log', 'Write a camera log', 0, 0, 1, 1, 'bool',
+            'Adds camera lines to NFSMWCopFly.log every 2 seconds while you drive. Only for testing.',
+            '1 = add camera lines to NFSMWCopFly.log (for testing)'),
+]
+CAMERA_DEFAULTS = {s.key: s.default for s in CAMERA_SETTINGS}
+CAMERA_SETTING = {s.key: s for s in CAMERA_SETTINGS}
+
 
 def _fmt(s, v):
     if s.kind in ('int', 'bool'):
@@ -41,7 +68,19 @@ def _fmt(s, v):
     return ('%.2f' % float(v)).rstrip('0').rstrip('.')
 
 
-def ini_text(values, launch=True, keep=None):
+def camera_text(camera=None):
+    camera = camera or {}
+    v = dict(CAMERA_DEFAULTS, **(camera.get('settings') or {}))
+    lines = ['', '[Camera]',
+             '; Camera tweaks for the driving views (chase, bumper and hood). Both are off by default.',
+             ('FovSpeed = %d' % bool(camera.get('fov_speed'))).ljust(21) + '; 1 = the field of view widens as you go faster']
+    lines += [('%s = %s' % (s.key, _fmt(s, v[s.key]))).ljust(21) + '; ' + s.comment for s in CAMERA_SETTINGS[:4]]
+    lines.append(('SmoothCam = %d' % bool(camera.get('smooth'))).ljust(21) + '; 1 = smoother chase camera and less shake')
+    lines += [('%s = %s' % (s.key, _fmt(s, v[s.key]))).ljust(21) + '; ' + s.comment for s in CAMERA_SETTINGS[4:]]
+    return '\n'.join(lines) + '\n'
+
+
+def ini_text(values, launch=True, keep=None, camera=None):
     keep = keep or {}
     v = dict(DEFAULTS, **(values or {}))
     lines = ['[CopFly]',
@@ -56,4 +95,4 @@ def ini_text(values, launch=True, keep=None):
     for s in SETTINGS:
         lines.append(('%s = %s' % (s.key, _fmt(s, v[s.key]))).ljust(21) + '; ' + s.comment)
     lines.append('UpAxis = 1           ; physics up axis, leave at 1')
-    return '\n'.join(lines) + '\n'
+    return '\n'.join(lines) + '\n' + camera_text(camera)

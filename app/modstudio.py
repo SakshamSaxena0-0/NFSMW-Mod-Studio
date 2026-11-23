@@ -14,7 +14,7 @@ from profiles import BUILTIN_PROFILES, builtin_profile
 from vltdb import FormatError
 
 APP_NAME = 'NFSMW Mod Studio'
-APP_VERSION = '1.7.0'
+APP_VERSION = '1.8.0'
 REPO_URL = ''
 
 
@@ -94,6 +94,10 @@ class Api:
             cfg['copfly'] = {'installed': installed,
                              'settings': self._game.read_copfly() if installed
                              else dict(copfly_cfg.DEFAULTS, **(cfg['copfly'].get('settings') or {}))}
+            fov, smooth = self._game.camera_modes() if plugin else (False, False)
+            cfg['camera'] = {'fov_speed': fov, 'smooth': smooth,
+                             'settings': self._game.read_camera() if fov or smooth
+                             else dict(copfly_cfg.CAMERA_DEFAULTS, **(cfg['camera'].get('settings') or {}))}
             data_mods = any(c.get('enabled') or c.get('nitro') for c in cfg['cars'].values()) or \
                 cfg['police'].get('enabled') or cfg['police'].get('no_puncture') or cfg['nitro'].get('all_racers') or \
                 cfg['world'].get('no_stopping')
@@ -127,6 +131,9 @@ class Api:
                 'presets': T.PRESETS, 'presetNitro': sorted(T.PRESET_NITRO),
                 'copflyDefs': [{'key': s.key, 'label': s.label, 'help': s.help, 'lo': s.lo, 'hi': s.hi,
                                 'step': s.step, 'kind': s.kind, 'default': s.default} for s in copfly_cfg.SETTINGS],
+                'cameraDefs': [{'key': s.key, 'label': s.label, 'help': s.help, 'lo': s.lo, 'hi': s.hi,
+                                'step': s.step, 'kind': s.kind, 'default': s.default}
+                               for s in copfly_cfg.CAMERA_SETTINGS],
                 'extraOptions': bool(self._game and self._game.extra_options_installed()),
                 'builtins': [{'name': n, 'desc': d} for n, d in BUILTIN_PROFILES],
                 'links': G.LINKS,
@@ -178,6 +185,11 @@ class Api:
         out.append({'title': 'CopFly compatibility', 'state': 'ok' if cf else 'bad',
                     'text': 'speed.exe is v1.3: CopFly will work.' if cf else 'speed.exe is not v1.3: CopFly will not '
                     'work (everything else does).'})
+        cam = G.camera_compatible(g.path)
+        out.append({'title': 'Camera compatibility', 'state': 'ok' if cam else 'bad',
+                    'text': 'speed.exe has the v1.3 camera code: the Camera page will work.' if cam else
+                    'speed.exe does not have the v1.3 camera code: the Camera page will not work (everything else '
+                    'does).'})
         run = G.game_running()
         out.append({'title': 'Game running', 'state': 'warn' if run else 'ok',
                     'text': 'Running. Close it before you press Apply.' if run else 'Not running.'})
@@ -221,9 +233,14 @@ class Api:
                 if cfg.get('heat') is not None and self._game.extra_options_installed():
                     self._game.write_heat(cfg['heat'])
                 keep = {kind: bool(cfg['world'].get('keep_' + kind)) for kind in T.KEEP_KINDS}
-                if cfg['copfly'].get('installed') or any(keep.values()):
+                cam = cfg['camera']
+                camera_on = cam.get('fov_speed') or cam.get('smooth')
+                if camera_on and not G.camera_compatible(self._game.path):
+                    notes.append('Your speed.exe does not have the v1.3 camera code, so the Camera page has no '
+                                 'effect in the game.')
+                if cfg['copfly'].get('installed') or any(keep.values()) or camera_on:
                     self._game.install_copfly(cfg['copfly'].get('settings', {}), launch=bool(cfg['copfly'].get('installed')),
-                                              keep=keep)
+                                              keep=keep, camera=cam)
                 elif self._game.copfly_installed():
                     self._game.uninstall_copfly()
                 self._game.save_applied(cfg)
@@ -253,6 +270,10 @@ class Api:
         if kept:
             lines.append('No stopping on hits: %s' % ', '.join(kept))
         lines.append('CopFly %s' % ('installed' if cfg['copfly'].get('installed') else 'off'))
+        cam = [label for key, label in (('fov_speed', 'FOV widens with speed'), ('smooth', 'smoother, no shake'))
+               if cfg['camera'].get(key)]
+        if cam:
+            lines.append('Camera: %s' % ', '.join(cam))
         return {'ok': True, 'lines': lines, 'notes': stats['skipped'] + notes, 'state': self.get_state()}
 
     def restore(self):
@@ -265,7 +286,7 @@ class Api:
                 cur, _ = self._current_cfg()
                 self._game.restore_data()
                 off = T.default_config()
-                off['heat'], off['copfly'] = cur.get('heat'), cur['copfly']
+                off['heat'], off['copfly'], off['camera'] = cur.get('heat'), cur['copfly'], cur['camera']
                 for kind in T.KEEP_KINDS:
                     off['world']['keep_' + kind] = cur['world'].get('keep_' + kind, False)
                 self._game.save_applied(off)

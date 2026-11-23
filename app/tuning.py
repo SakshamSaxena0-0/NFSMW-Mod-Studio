@@ -1,6 +1,8 @@
 import copy
+import math
 import struct
 
+from copfly_cfg import CAMERA_SETTING
 from vltdb import AttribDB, h32
 
 PVEHICLE = h32('pvehicle')
@@ -105,7 +107,29 @@ def default_config():
         'nitro': {'boost': 3.0, 'all_racers': False},
         'heat': None,
         'copfly': {'installed': False, 'settings': {}},
+        'camera': {'fov_speed': False, 'smooth': False, 'settings': {}},
     }
+
+
+def _flag(v):
+    return v is True or (type(v) in (int, float) and v == 1)
+
+
+def camera_config(cam):
+    cam = cam if isinstance(cam, dict) else {}
+    out = {'fov_speed': _flag(cam.get('fov_speed')), 'smooth': _flag(cam.get('smooth')), 'settings': {}}
+    settings = cam.get('settings')
+    for key, v in (settings.items() if isinstance(settings, dict) else ()):
+        s = CAMERA_SETTING.get(key)
+        if s is None or type(v) not in (bool, int, float) or not math.isfinite(v):
+            continue
+        v = min(max(float(v), s.lo), s.hi)
+        out['settings'][key] = int(round(v)) if s.kind == 'bool' else v
+    st = out['settings']
+    start = st.get('FovStartSpeed', CAMERA_SETTING['FovStartSpeed'].default)
+    if st.get('FovFullSpeed', CAMERA_SETTING['FovFullSpeed'].default) < start + 1:
+        st['FovFullSpeed'] = start + 1
+    return out
 
 
 def normalize(cfg):
@@ -119,6 +143,7 @@ def normalize(cfg):
         old = bool(out['world'].pop('keep_speed'))
         out['world']['keep_cops'] = out['world']['keep_cops'] or old
         out['world']['keep_traffic'] = out['world']['keep_traffic'] or old
+    out['camera'] = camera_config(out.get('camera'))
     return out
 
 

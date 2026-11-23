@@ -1,6 +1,9 @@
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <math.h>
+#include "hooks.h"
 
 typedef struct { float x, y, z; } vec3;
 #define TC __attribute__((thiscall))
@@ -14,20 +17,15 @@ typedef void  (TC *Destroy_t)(void *self);
 typedef char  (TC *OnTask_t)(void *self, void *task, float dt);
 typedef void  (TC *Simulate_t)(void *self, float dt);
 
-#define COP_SLOT     ((void **)0x008AD460)
-#define DV_SLOT      ((void **)0x008AD2F4)
-#define RACER_SLOT   ((void **)0x008AD378)
-#define COP_IMPACT   ((OnImpact_t)0x0069CA30)
-#define DV_IMPACT    ((OnImpact_t)0x0069C030)
+#define COP_IMPACT   ((OnImpact_t)COP_IMPACT_ADDR)
+#define DV_IMPACT    ((OnImpact_t)DV_IMPACT_ADDR)
 #define QI           ((QI_t)0x005D59F0)
 #define IID_RB       ((void *)0x004039C0)
 #define IID_DAMAGE   ((void *)0x00405000)
 #define VT_COP_DMG   ((void *)0x008AD40C)
 #define TASK_SLOT    ((void **)0x008AD434)
 #define COP_TASK     ((OnTask_t)0x006B6730)
-#define RBCOP_SLOT   ((void **)0x008AD020)
-#define RBCOP_SIM    ((Simulate_t)0x0068BC80)
-#define RBVEH_SLOT   ((void **)0x008AC950)
+#define RBCOP_SIM    ((Simulate_t)RBCOP_SIM_ADDR)
 
 static float g_margin = 0.1f, g_up = 14.0f, g_push = 0.5f, g_kick = 5.0f, g_spin = 3.0f, g_minspeed = 4.0f, g_plspeed = 5.0f;
 static int g_wreck = 0, g_log = 1, g_upaxis = 1, g_nlaunch = 0, g_ncop = 0, g_nplayer = 0;
@@ -310,6 +308,226 @@ static void TC SimHook(void *self, float dt) {
     report();
 }
 
+typedef void (TC *Noise_t)(void *cam, void *m, float time, float k);
+typedef void (*LookAt_t)(void *out, vec3 *from, vec3 *to, vec3 *up);
+#define CAM_NOISE    ((Noise_t)CAM_NOISE_ADDR)
+#define CAM_LOOKAT   ((LookAt_t)CAM_LOOKAT_ADDR)
+#define DEG_UNITS    (65536.0f / 360.0f)
+
+static int g_cam_fov = 0, g_cam_smooth = 0, g_cam_log = 0, g_ncamlog = 0;
+static float g_fov_max = 12.0f, g_fov_start = 15.0f, g_fov_full = 70.0f, g_fov_resp = 0.35f;
+static float g_smooth = 0.5f, g_shake = 0.0f;
+static unsigned g_nfov = 0, g_nlook = 0, g_nnoise = 0;
+static DWORD g_camrep = 0;
+static void * __attribute__((used)) g_cam_mover = 0;
+static char * __attribute__((used)) g_cam_ebp = 0;
+
+static void camlog(int important, const char *fmt, ...) {
+    if (!g_cam_log && !(important && g_log)) return;
+    FILE *f = fopen(g_logpath, "a"); if (!f) return;
+    va_list a; va_start(a, fmt); vfprintf(f, fmt, a); va_end(a); fclose(f);
+}
+
+typedef struct { void *mover; DWORD seen, tf, tl; float fov, extra; vec3 d, up, to; int valid, mode, back; } camstate_t;
+static camstate_t g_cams[4];
+
+static camstate_t *cam_state(void *m) {
+    DWORD now = GetTickCount();
+    camstate_t *o = &g_cams[0];
+    for (int i = 0; i < 4; i++) {
+        if (g_cams[i].mover == m) { g_cams[i].seen = now; return &g_cams[i]; }
+        if (now - g_cams[i].seen > now - o->seen) o = &g_cams[i];
+    }
+    memset(o, 0, sizeof *o); o->mover = m; o->seen = now;
+    return o;
+}
+static int mover_ok(void *m) {
+    if (!m || IsBadReadPtr(m, 0xe4)) return 0;
+    void **v = vt(m);
+    return v && !IsBadReadPtr(v, 12) && v[2] == (void *)CAM_UPDATE_ADDR;
+}
+static int cam_mode(void *m) { return *(int *)((char *)m + 0x9c); }
+static int cam_back(void *m) { return *((unsigned char *)m + 0xa1) != 0; }
+static float cam_speed(void *m) {
+    void *a = *(void **)((char *)m + 0x80);
+    if (!a || IsBadReadPtr(a, 0x14)) return 0;
+    float v = *(float *)((char *)a + 0x10);
+    return isfinite(v) && v > 0 && v < 300 ? v : 0;
+}
+static float cam_dt(DWORD last, DWORD now) {
+    char *bp = g_cam_ebp;
+    if (bp && !IsBadReadPtr(bp + 8, 4)) {
+        float d = *(float *)(bp + 8);
+        if (isfinite(d) && d >= 0 && d < 0.25f) return d;
+    }
+    float d = (now - last) / 1000.0f;
+    return d < 0 ? 0 : d > 0.1f ? 0.1f : d;
+}
+static float ease(float dt, float tau) { return tau > 0.001f ? 1.0f - expf(-dt / tau) : 1.0f; }
+static vec3 v_add(vec3 a, vec3 b) { return (vec3){ a.x + b.x, a.y + b.y, a.z + b.z }; }
+static vec3 v_sub(vec3 a, vec3 b) { return (vec3){ a.x - b.x, a.y - b.y, a.z - b.z }; }
+static vec3 v_mul(vec3 a, float k) { return (vec3){ a.x * k, a.y * k, a.z * k }; }
+static float v_dot(vec3 a, vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+static float v_len(vec3 a) { return sqrtf(v_dot(a, a)); }
+static int v_ok(vec3 a) { return isfinite(a.x) && isfinite(a.y) && isfinite(a.z); }
+
+static void cam_report(void *m, camstate_t *s) {
+    DWORD now = GetTickCount();
+    if (!g_cam_log || now - g_camrep < 2000 || g_ncamlog >= 60) return;
+    g_camrep = now; g_ncamlog++;
+    camlog(0, "camera: mode %d%s speed %.1f m/s, extra FOV %.1f deg, calls FOV %u smooth %u shake %u\n",
+           cam_mode(m), cam_back(m) ? " (looking back)" : "", cam_speed(m), s->extra, g_nfov, g_nlook, g_nnoise);
+}
+
+static float __attribute__((used)) cam_fov(float base) {
+    void *m = g_cam_mover;
+    g_nfov++;
+    if (!g_cam_fov || !isfinite(base) || base <= 0 || !mover_ok(m)) return base;
+    camstate_t *s = cam_state(m);
+    DWORD now = GetTickCount();
+    float dt = cam_dt(s->tf, now), want = 0;
+    int mode = cam_mode(m);
+    if (mode >= 0 && mode <= 6) {
+        float t = (cam_speed(m) - g_fov_start) / (g_fov_full - g_fov_start);
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        want = g_fov_max * t * t * (3 - 2 * t);
+    }
+    if (!s->tf || now - s->tf > 1000) s->fov = want;
+    else s->fov += (want - s->fov) * ease(dt, g_fov_resp);
+    s->tf = now;
+    float out = base + s->fov * DEG_UNITS, cap = 160.0f * DEG_UNITS;
+    if (out > cap) out = base > cap ? base : cap;
+    s->extra = (out - base) / DEG_UNITS;
+    cam_report(m, s);
+    return out;
+}
+
+static void cam_follow(camstate_t *s, void *m, vec3 *from, const vec3 *to, vec3 *up) {
+    DWORD now = GetTickCount();
+    float dt = cam_dt(s->tl, now);
+    int mode = cam_mode(m), back = cam_back(m);
+    vec3 d = v_sub(*from, *to);
+    float len = v_len(d);
+    int fresh = !s->valid || now - s->tl > 250 || mode != s->mode || back != s->back || v_len(v_sub(*to, s->to)) > 20.0f;
+    s->tl = now; s->mode = mode; s->back = back; s->to = *to;
+    if (mode < 2 || mode > 6 || back || !v_ok(d) || !v_ok(*up) || !(len > 0.5f && len < 60.0f)) { s->valid = 0; return; }
+    if (fresh) { s->d = d; s->up = *up; s->valid = 1; return; }
+    float a = ease(dt, g_smooth * 0.3f);
+    s->d = v_add(s->d, v_mul(v_sub(d, s->d), a));
+    vec3 dev = v_sub(s->d, d);
+    float dl = v_len(dev), maxd = len * 0.15f * g_smooth;
+    if (dl > maxd) s->d = v_add(d, v_mul(dev, maxd / dl));
+    float sl = v_len(s->d);
+    if (!(sl > 0.01f) || !v_ok(s->d)) { s->valid = 0; return; }
+    s->d = v_mul(s->d, len / sl);
+    *from = v_add(*to, s->d);
+    float ul = v_len(*up);
+    if (ul > 0.5f) {
+        vec3 u = v_mul(*up, 1.0f / ul);
+        s->up = v_add(s->up, v_mul(v_sub(u, s->up), a));
+        float l = v_len(s->up);
+        s->up = l > 0.01f ? v_mul(s->up, 1.0f / l) : u;
+        if (v_dot(s->up, u) < 0.985f) s->up = u;
+        *up = v_mul(s->up, ul);
+    }
+}
+
+static void __attribute__((used)) cam_lookat(void *out, vec3 *from, vec3 *to, vec3 *up) {
+    void *m = g_cam_mover;
+    g_nlook++;
+    if (g_cam_smooth && g_smooth > 0 && mover_ok(m) && from && to && up &&
+        !IsBadWritePtr(from, 12) && !IsBadReadPtr(to, 12) && !IsBadWritePtr(up, 12)) {
+        camstate_t *s = cam_state(m);
+        cam_follow(s, m, from, to, up);
+        cam_report(m, s);
+    }
+    CAM_LOOKAT(out, from, to, up);
+}
+
+static void TC NoiseHook(void *cam, void *m, float time, float k) {
+    g_nnoise++;
+    CAM_NOISE(cam, m, time, k * g_shake);
+}
+
+void FovStub(void);
+void LookAtStub(void);
+#define STR2(x) #x
+#define STR(x) STR2(x)
+__asm__(
+    ".text\n"
+    ".p2align 4\n"
+    "_FovStub:\n"
+    "    movl %esi, _g_cam_mover\n"
+    "    movl %ebp, _g_cam_ebp\n"
+    "    subl $4, %esp\n"
+    "    fstps (%esp)\n"
+    "    call _cam_fov\n"
+    "    addl $4, %esp\n"
+    "    movl $" STR(CAM_FTOL_ADDR) ", %eax\n"
+    "    jmp *%eax\n"
+    ".p2align 4\n"
+    "_LookAtStub:\n"
+    "    movl %esi, _g_cam_mover\n"
+    "    movl %ebp, _g_cam_ebp\n"
+    "    jmp _cam_lookat\n"
+);
+
+static float inic(const char *ini, const char *key, float def, float lo, float hi) {
+    char buf[32], d[32], *end; snprintf(d, sizeof d, "%g", def);
+    GetPrivateProfileStringA("Camera", key, d, buf, sizeof buf, ini);
+    float v = strtof(buf, &end);
+    if (end == buf || !isfinite(v)) return def;
+    return v < lo ? lo : v > hi ? hi : v;
+}
+static int call_ok(unsigned char *site, unsigned target, const char *name) {
+    if (IsBadReadPtr(site, 5) || site[0] != 0xE8) {
+        camlog(1, "camera: %s at %p is not a call - camera not hooked\n", name, site); return 0;
+    }
+    unsigned got = (unsigned)(site + 5 + *(int *)(site + 1));
+    if (got != target) {
+        camlog(1, "camera: %s at %p calls %08x, expected %08x - camera not hooked\n", name, site, got, target); return 0;
+    }
+    return 1;
+}
+static void hook_call(unsigned char *site, void *fn, const char *name) {
+    DWORD old;
+    if (!VirtualProtect(site, 5, PAGE_EXECUTE_READWRITE, &old)) { camlog(1, "camera: could not unprotect %s\n", name); return; }
+    *(int *)(site + 1) = (int)((char *)fn - (char *)(site + 5));
+    VirtualProtect(site, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), site, 5);
+    camlog(0, "camera: hooked %s at %p\n", name, site);
+}
+static void cam_setup(const char *ini) {
+    g_cam_fov = GetPrivateProfileIntA("Camera", "FovSpeed", 0, ini) != 0;
+    g_cam_smooth = GetPrivateProfileIntA("Camera", "SmoothCam", 0, ini) != 0;
+    g_cam_log = GetPrivateProfileIntA("Camera", "Log", 0, ini) != 0;
+    if (!g_cam_fov && !g_cam_smooth) return;
+    g_fov_max = inic(ini, "FovMaxExtra", g_fov_max, 0, 30);
+    g_fov_start = inic(ini, "FovStartSpeed", g_fov_start, 0, 100);
+    g_fov_full = inic(ini, "FovFullSpeed", g_fov_full, 1, 150);
+    if (g_fov_full < g_fov_start + 1) g_fov_full = g_fov_start + 1;
+    g_fov_resp = inic(ini, "FovResponse", g_fov_resp, 0.02f, 5);
+    g_smooth = inic(ini, "SmoothAmount", g_smooth, 0, 1);
+    g_shake = inic(ini, "ShakeScale", g_shake, 0, 1);
+    camlog(0, "camera settings: FovSpeed %d FovMaxExtra %.1f FovStartSpeed %.1f FovFullSpeed %.1f FovResponse %.2f SmoothCam %d SmoothAmount %.2f ShakeScale %.2f\n",
+           g_cam_fov, g_fov_max, g_fov_start, g_fov_full, g_fov_resp, g_cam_smooth, g_smooth, g_shake);
+    int ok = !IsBadReadPtr(CAM_UPDATE_SLOT, 4) && *CAM_UPDATE_SLOT == (void *)CAM_UPDATE_ADDR;
+    if (!ok) camlog(1, "camera: chase camera update not found at %p - camera not hooked\n", CAM_UPDATE_SLOT);
+    ok = call_ok(CAM_FOV_CALL, CAM_FTOL_ADDR, "FOV") & ok;
+    ok = call_ok(CAM_LOOKAT_CALL, CAM_LOOKAT_ADDR, "look-at") & ok;
+    ok = call_ok(CAM_SHAKE_CALL, CAM_NOISE_ADDR, "speed shake") & ok;
+    ok = call_ok(CAM_NEAR_SHAKE_CALL, CAM_NOISE_ADDR, "nearby shake") & ok;
+    ok = call_ok(CAM_EVENT_SHAKE_CALL, CAM_NOISE_ADDR, "event shake") & ok;
+    if (!ok) { g_cam_fov = g_cam_smooth = 0; return; }
+    if (g_cam_fov) hook_call(CAM_FOV_CALL, (void *)FovStub, "FOV");
+    if (g_cam_smooth && g_smooth > 0) hook_call(CAM_LOOKAT_CALL, (void *)LookAtStub, "smoothing");
+    if (g_cam_smooth && g_shake < 1) {
+        hook_call(CAM_SHAKE_CALL, (void *)NoiseHook, "speed shake");
+        hook_call(CAM_NEAR_SHAKE_CALL, (void *)NoiseHook, "nearby shake");
+        hook_call(CAM_EVENT_SHAKE_CALL, (void *)NoiseHook, "event shake");
+    }
+}
+
 static float inif(const char *ini, const char *key, float def) {
     char buf[32], d[32]; snprintf(d, sizeof d, "%g", def);
     GetPrivateProfileStringA("CopFly", key, d, buf, sizeof buf, ini); return (float)atof(buf);
@@ -342,12 +560,13 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r) {
     g_keep_traffic = GetPrivateProfileIntA("CopFly", "KeepSpeedTraffic", old, ini);
     g_keep_walls = GetPrivateProfileIntA("CopFly", "KeepSpeedWalls", 0, ini);
     g_keep = g_keep_cops || g_keep_traffic || g_keep_walls;
-    logmsg("CopFly v11 loaded: Launch %d KeepSpeed cops %d traffic %d walls %d MinImpactSpeed %.1f MinPlayerSpeed %.1f ContactMargin %.2f UpSpeed %.1f PushFactor %.2f ForwardKick %.1f Spin %.1f Wreck %d UpAxis %d\n",
+    logmsg("CopFly v12 loaded: Launch %d KeepSpeed cops %d traffic %d walls %d MinImpactSpeed %.1f MinPlayerSpeed %.1f ContactMargin %.2f UpSpeed %.1f PushFactor %.2f ForwardKick %.1f Spin %.1f Wreck %d UpAxis %d\n",
            g_launch, g_keep_cops, g_keep_traffic, g_keep_walls, g_minspeed, g_plspeed, g_margin, g_up, g_push, g_kick, g_spin, g_wreck, g_upaxis);
     patch(COP_SLOT, (void *)COP_IMPACT, (void *)CopHook, "DamageCopCar");
     patch(DV_SLOT, (void *)DV_IMPACT, (void *)CarHook, "DamageVehicle");
     patch(RACER_SLOT, (void *)DV_IMPACT, (void *)CarHook, "DamageRacer");
     patch(RBCOP_SLOT, (void *)RBCOP_SIM, (void *)SimHook, "RBCop simulate");
     patch(RBVEH_SLOT, (void *)RBCOP_SIM, (void *)VehSimHook, "RBVehicle simulate");
+    cam_setup(ini);
     return TRUE;
 }

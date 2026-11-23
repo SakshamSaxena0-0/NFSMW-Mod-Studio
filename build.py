@@ -12,8 +12,16 @@ def run(*cmd):
     subprocess.check_call(cmd, cwd=ROOT)
 
 
+def write_hooks_header():
+    sys.path.insert(0, APP)
+    import hooks
+    with open(os.path.join(ROOT, 'copfly', 'hooks.h'), 'w', encoding='ascii', newline='\n') as f:
+        f.write(hooks.header())
+
+
 def main():
     os.makedirs(os.path.join(APP, 'copfly'), exist_ok=True)
+    write_hooks_header()
     run(sys.executable, '-m', 'ziglang', 'cc', '-target', 'x86-windows-gnu', '-shared', '-O2', '-s',
         '-o', os.path.join(APP, 'copfly', 'NFSMWCopFly.asi'), os.path.join(ROOT, 'copfly', 'copfly.c'))
     for junk in ('NFSMWCopFly.lib', 'NFSMWCopFly.pdb'):
